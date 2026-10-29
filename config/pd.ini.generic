@@ -1,0 +1,112 @@
+[Audio]
+BufferSize=512
+QueueLimit=8192
+
+[Input]
+MouseEnabled=1
+MouseLockMode=2
+MouseSpeedX=2.500000
+MouseSpeedY=2.500000
+FakeGamepads=0
+FirstGamepadNum=0
+UseHIDAPI=1
+UseRawInput=0
+
+[Input.Player1]
+RumbleScale=0.500000
+LStickDeadzoneX=4096
+LStickDeadzoneY=4096
+RStickDeadzoneX=4096
+RStickDeadzoneY=6144
+LStickScaleX=1.000000
+LStickScaleY=1.000000
+RStickScaleX=1.000000
+RStickScaleY=1.000000
+StickCButtons=0
+CancelCButtons=0
+SwapSticks=1
+ControllerIndex=0
+
+[Input.Player1.Binds]
+R_CBUTTONS=D, JOY1_DPAD_RIGHT
+L_CBUTTONS=A, JOY1_DPAD_LEFT
+D_CBUTTONS=S, JOY1_DPAD_DOWN
+U_CBUTTONS=W, JOY1_DPAD_UP
+R_TRIG=MOUSE_RIGHT, Z, JOY1_LTRIGGER
+L_TRIG=F, X, JOY1_RSHOULDER
+X_BUTTON=R, JOY1_X
+Y_BUTTON=MOUSE_WHEEL_DN, JOY1_Y
+R_JPAD=NONE
+L_JPAD=MOUSE_WHEEL_UP, JOY1_B
+D_JPAD=Q, MOUSE_MIDDLE, JOY1_LSHOULDER
+U_JPAD=NONE
+START_BUTTON=TAB, JOY1_START
+Z_TRIG=MOUSE_LEFT, SPACE, JOY1_RTRIGGER
+B_BUTTON=E
+A_BUTTON=JOY1_A
+STICK_XNEG=LEFT
+STICK_XPOS=RIGHT
+STICK_YNEG=DOWN
+STICK_YPOS=UP
+ACCEPT_BUTTON=RETURN, E, JOY1_A
+CANCEL_BUTTON=MOUSE_RIGHT, JOY1_B
+CK_0040=NONE
+CK_0080=NONE
+CK_0100=NONE
+CK_0200=NONE
+CK_0400=NONE
+CK_0800=NONE
+CK_1000=NONE
+CK_2000=LEFT_CTRL
+CK_4000=LEFT_SHIFT
+CK_8000=JOY1_LSTICK
+
+[Game]
+MemorySize=16
+CenterHUD=0
+MenuMouseControl=1
+ScreenShakeIntensity=1.000000
+TickRateDivisor=1
+ExtraSleep=1
+SkipIntro=0
+DisableMpDeathMusic=0
+GEMuzzleFlashes=1
+MaxExplosions=6
+
+[Game.Player1]
+FovY=60.000000
+FovAffectsZoom=1
+MouseAimMode=0
+MouseAimSpeedX=0.700000
+MouseAimSpeedY=0.700000
+RadialMenuSpeed=4.000000
+CrosshairSway=1.000000
+CrosshairEdgeBoundary=0.700000
+CrouchMode=3
+ExtendedControls=1
+CrosshairColour=16711720
+CrosshairSize=2
+CrosshairHealth=0
+UseKeyReloads=0
+
+[Video]
+DefaultFullscreen=1
+DefaultMaximize=0
+DefaultWidth=320
+DefaultHeight=240
+ExclusiveFullscreen=0
+CenterWindow=0
+AllowHiDpi=0
+VSync=1
+FramebufferEffects=0
+FramerateLimit=30
+DisplayFPS=0
+DisplayFPSInterval=1.000000
+MSAA=1
+TextureFilter=1
+TextureFilter2D=1
+DetailTextures=1
+MipmapFilter=2
+AnisotropicFilter=1
+GlareBrightness=1.000000
+OverexposureScale=1.000000

@@ -1,0 +1,3 @@
+# SDL_GameControllerDB mappings for Raspberry Pi Zero 2W / Pi Tin (GPIOnext)
+030000000f270000b822000001000000,GPIOnext Joypad 1,a:b0,b:b1,x:b2,y:b3,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,leftx:a0,lefty:a1,dpup:-a1,dpdown:+a1,dpleft:-a0,dpright:+a0,platform:Linux,
+03000000010000000100000001010000,GPIOnext Joypad 1,a:b0,b:b1,x:b2,y:b3,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,leftx:a0,lefty:a1,dpup:-a1,dpdown:+a1,dpleft:-a0,dpright:+a0,platform:Linux,

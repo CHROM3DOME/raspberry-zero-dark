@@ -1,0 +1,932 @@
+diff --git a/port/fast3d/gfx_cc.h b/port/fast3d/gfx_cc.h
+index 5fd4797c7..2e1a3009c 100644
+--- a/port/fast3d/gfx_cc.h
++++ b/port/fast3d/gfx_cc.h
+@@ -4,9 +4,11 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ 
+-#ifdef __cplusplus
++#if defined(__cplusplus) && defined(__has_include)
++#if __has_include(<compare>)
+ #include <compare>
+ #endif
++#endif
+ 
+ enum {
+     SHADER_0,
+@@ -44,7 +46,17 @@ enum {
+ struct ColorCombinerKey {
+     uint64_t combine_mode;
+     uint64_t options;
++    #if defined(__cpp_impl_three_way_comparison)
+     auto operator<=>(const ColorCombinerKey&) const = default;
++#else
++    bool operator<(const ColorCombinerKey& o) const {
++        if (combine_mode != o.combine_mode) return combine_mode < o.combine_mode;
++        return options < o.options;
++    }
++    bool operator==(const ColorCombinerKey& o) const {
++        return combine_mode == o.combine_mode && options == o.options;
++    }
++#endif
+ };
+ 
+ #define SHADER_MAX_TEXTURES 2
+diff --git a/port/fast3d/gfx_opengl.cpp b/port/fast3d/gfx_opengl.cpp
+index db5cfbfc4..0ababed8e 100644
+--- a/port/fast3d/gfx_opengl.cpp
++++ b/port/fast3d/gfx_opengl.cpp
+@@ -46,6 +46,7 @@ struct Framebuffer {
+ 
+ static std::map<pair<uint64_t, uint32_t>, struct ShaderProgram> shader_program_pool;
+ static GLuint opengl_vbo;
++static struct ShaderProgram* current_shader_program = NULL;
+ static GLuint opengl_vao;
+ static bool current_depth_mask;
+ 
+@@ -119,9 +120,12 @@ static void gfx_opengl_unload_shader(struct ShaderProgram* old_prg) {
+ }
+ 
+ static void gfx_opengl_load_shader(struct ShaderProgram* new_prg) {
++    current_shader_program = new_prg;
+     // if (!new_prg) return;
+     glUseProgram(new_prg->opengl_program_id);
+-    gfx_opengl_vertex_array_set_attribs(new_prg);
++    if (!gl_es) {
++        gfx_opengl_vertex_array_set_attribs(new_prg);
++    }
+     gfx_opengl_set_uniforms(new_prg);
+ }
+ 
+@@ -265,15 +269,16 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+ 
+     for (int i = 0; i < 2; i++) {
+         if (cc_features.used_textures[i]) {
+-            vs_len += sprintf(vs_buf + vs_len, "INPUT vec2 aTexCoord%d;\n", i);
++            int num_clamps = (cc_features.clamp[i][0] ? 1 : 0) + (cc_features.clamp[i][1] ? 1 : 0);
++            int tc_dim = 2 + num_clamps;
++            vs_len += sprintf(vs_buf + vs_len, "INPUT vec%d aTexCoord%d;\n", tc_dim, i);
+             vs_len += sprintf(vs_buf + vs_len, "OUTPUT vec2 vTexCoord%d;\n", i);
+-            num_floats += 2;
+-            for (int j = 0; j < 2; j++) {
+-                if (cc_features.clamp[i][j]) {
+-                    vs_len += sprintf(vs_buf + vs_len, "INPUT float aTexClamp%s%d;\n", j == 0 ? "S" : "T", i);
+-                    vs_len += sprintf(vs_buf + vs_len, "OUTPUT float vTexClamp%s%d;\n", j == 0 ? "S" : "T", i);
+-                    num_floats += 1;
+-                }
++            num_floats += tc_dim;
++            if (cc_features.clamp[i][0]) {
++                vs_len += sprintf(vs_buf + vs_len, "OUTPUT float vTexClampS%d;\n", i);
++            }
++            if (cc_features.clamp[i][1]) {
++                vs_len += sprintf(vs_buf + vs_len, "OUTPUT float vTexClampT%d;\n", i);
+             }
+         }
+     }
+@@ -298,12 +303,14 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+     append_line(vs_buf, &vs_len, "void main() {");
+     for (int i = 0; i < 2; i++) {
+         if (cc_features.used_textures[i]) {
+-            vs_len += sprintf(vs_buf + vs_len, "    vTexCoord%d = aTexCoord%d;\n", i, i);
+-            for (int j = 0; j < 2; j++) {
+-                if (cc_features.clamp[i][j]) {
+-                    vs_len += sprintf(vs_buf + vs_len, "    vTexClamp%s%d = aTexClamp%s%d;\n", j == 0 ? "S" : "T", i,
+-                                      j == 0 ? "S" : "T", i);
+-                }
++            vs_len += sprintf(vs_buf + vs_len, "    vTexCoord%d = aTexCoord%d.xy;\n", i, i);
++            if (cc_features.clamp[i][0] && cc_features.clamp[i][1]) {
++                vs_len += sprintf(vs_buf + vs_len, "    vTexClampS%d = aTexCoord%d.z;\n", i, i);
++                vs_len += sprintf(vs_buf + vs_len, "    vTexClampT%d = aTexCoord%d.w;\n", i, i);
++            } else if (cc_features.clamp[i][0]) {
++                vs_len += sprintf(vs_buf + vs_len, "    vTexClampS%d = aTexCoord%d.z;\n", i, i);
++            } else if (cc_features.clamp[i][1]) {
++                vs_len += sprintf(vs_buf + vs_len, "    vTexClampT%d = aTexCoord%d.z;\n", i, i);
+             }
+         }
+     }
+@@ -320,7 +327,7 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+     append_line(vs_buf, &vs_len, "    gl_Position = aVtxPos;");
+     if (!GLAD_GL_ARB_depth_clamp) {
+         // HACK: workaround for no GL_DEPTH_CLAMP
+-        append_line(vs_buf, &vs_len, "    gl_Position.z *= 0.3f;");
++        append_line(vs_buf, &vs_len, "    gl_Position.z *= 0.3;");
+     }
+     append_line(vs_buf, &vs_len, "}");
+ 
+@@ -344,7 +351,8 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+ 
+     // Reference approach to color wrapping as per GLideN64
+     // Return wrapped value of x in interval [low, high)
+-    append_line(fs_buf, &fs_len, "#define WRAP(x, low, high) mod((x)-(low), (high)-(low)) + (low)");
++    append_line(fs_buf, &fs_len, "vec4 wrap(vec4 x, float low, float high) { return mod(x - vec4(low), high - low) + vec4(low); }");
++    append_line(fs_buf, &fs_len, "vec3 wrap(vec3 x, float low, float high) { return mod(x - vec3(low), high - low) + vec3(low); }");
+ 
+     append_line(fs_buf, &fs_len, "#define TEX_OFFSET(tex, uv, texSize, off) SAMPLE_TEX(tex, uv - (off)/texSize)");
+ 
+@@ -384,8 +392,8 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+     append_line(fs_buf, &fs_len, "uniform float noise_scale;");
+ 
+     append_line(fs_buf, &fs_len, "float random(in vec3 value) {");
+-    append_line(fs_buf, &fs_len, "    float random = dot(sin(value), vec3(12.9898, 78.233, 37.719));");
+-    append_line(fs_buf, &fs_len, "    return fract(sin(random) * 143758.5453);");
++    append_line(fs_buf, &fs_len, "    float rnd = dot(sin(value), vec3(12.9898, 78.233, 37.719));");
++    append_line(fs_buf, &fs_len, "    return fract(sin(rnd) * 143758.5453);");
+     append_line(fs_buf, &fs_len, "}");
+ 
+     if (current_filter_mode == FILTER_THREE_POINT) {
+@@ -446,33 +454,28 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+         if (cc_features.used_textures[i]) {
+             bool s = cc_features.clamp[i][0], t = cc_features.clamp[i][1];
+ 
+-            fs_len += sprintf(fs_buf + fs_len, "    vec2 texSize%d = vec2(textureSize(uTex%d, 0));\n", i, i);
+-
+             if (!s && !t) {
+                 fs_len += sprintf(fs_buf + fs_len, "    vec2 vTexCoordAdj%d = vTexCoord%d;\n", i, i);
+             } else {
+                 if (s && t) {
+                     fs_len += sprintf(fs_buf + fs_len,
+-                                      "    vec2 vTexCoordAdj%d = clamp(vTexCoord%d, 0.5 / texSize%d, "
++                                      "    vec2 vTexCoordAdj%d = clamp(vTexCoord%d, vec2(0.0), "
+                                       "vec2(vTexClampS%d, vTexClampT%d));\n",
+-                                      i, i, i, i, i);
++                                      i, i, i, i);
+                 } else if (s) {
+                     fs_len += sprintf(fs_buf + fs_len,
+-                                      "    vec2 vTexCoordAdj%d = vec2(clamp(vTexCoord%d.s, 0.5 / "
+-                                      "texSize%d.s, vTexClampS%d), vTexCoord%d.t);\n",
+-                                      i, i, i, i, i);
++                                      "    vec2 vTexCoordAdj%d = vec2(clamp(vTexCoord%d.s, 0.0, "
++                                      "vTexClampS%d), vTexCoord%d.t);\n",
++                                      i, i, i, i);
+                 } else {
+                     fs_len += sprintf(fs_buf + fs_len,
+                                       "    vec2 vTexCoordAdj%d = vec2(vTexCoord%d.s, clamp(vTexCoord%d.t, "
+-                                      "0.5 / texSize%d.t, vTexClampT%d));\n",
+-                                      i, i, i, i, i);
++                                      "0.0, vTexClampT%d));\n",
++                                      i, i, i, i);
+                 }
+             }
+ 
+-            if (current_filter_mode == FILTER_THREE_POINT)
+-                fs_len += sprintf(fs_buf + fs_len, "    vec4 texVal%d = hookTexture2D(uTex%d, vTexCoordAdj%d, texSize%d, three_point_filter%d);\n", i, i, i, i, i);
+-            else
+-                fs_len += sprintf(fs_buf + fs_len, "    vec4 texVal%d = hookTexture2D(uTex%d, vTexCoordAdj%d, texSize%d);\n", i, i, i, i);
++            fs_len += sprintf(fs_buf + fs_len, "    vec4 texVal%d = SAMPLE_TEX(uTex%d, vTexCoordAdj%d);\n", i, i, i);
+         }
+     }
+ 
+@@ -495,11 +498,11 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+         append_line(fs_buf, &fs_len, ";");
+ 
+         if (c == 0) {
+-            append_line(fs_buf, &fs_len, "    texel = WRAP(texel, -1.01, 1.01);");
++            append_line(fs_buf, &fs_len, "    texel = wrap(texel, -1.01, 1.01);");
+         }
+     }
+ 
+-    append_line(fs_buf, &fs_len, "    texel = WRAP(texel, -0.51, 1.51);");
++    append_line(fs_buf, &fs_len, "    texel = wrap(texel, -0.51, 1.51);");
+     append_line(fs_buf, &fs_len, "    texel = clamp(texel, 0.0, 1.0);");
+     // TODO discard if alpha is 0?
+     if (cc_features.opt_fog) {
+@@ -577,8 +580,40 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+     GLuint shader_program = glCreateProgram();
+     glAttachShader(shader_program, vertex_shader);
+     glAttachShader(shader_program, fragment_shader);
++
++    size_t bind_cnt = 0;
++    glBindAttribLocation(shader_program, bind_cnt++, "aVtxPos");
++    for (int i = 0; i < 2; i++) {
++        if (cc_features.used_textures[i]) {
++            char name[32];
++            sprintf(name, "aTexCoord%d", i);
++            glBindAttribLocation(shader_program, bind_cnt++, name);
++        }
++    }
++    if (cc_features.opt_fog) {
++        glBindAttribLocation(shader_program, bind_cnt++, "aFog");
++    }
++    if (cc_features.opt_grayscale) {
++        glBindAttribLocation(shader_program, bind_cnt++, "aGrayscaleColor");
++    }
++    for (int i = 0; i < cc_features.num_inputs; i++) {
++        char name[16];
++        sprintf(name, "aInput%d", i + 1);
++        glBindAttribLocation(shader_program, bind_cnt++, name);
++    }
++
+     glLinkProgram(shader_program);
+ 
++    GLint linked = 0;
++    glGetProgramiv(shader_program, GL_LINK_STATUS, &linked);
++    if (!linked) {
++        GLint max_length = 1024;
++        glGetProgramiv(shader_program, GL_INFO_LOG_LENGTH, &max_length);
++        char error_log[1024];
++        glGetProgramInfoLog(shader_program, max_length, &max_length, &error_log[0]);
++        sysLogPrintf(LOG_ERROR, "GL: Failed to link shader (ID %llx, %x):\n%s", shader_id0, shader_id1, error_log);
++    }
++
+     glDetachShader(shader_program, vertex_shader);
+     glDetachShader(shader_program, fragment_shader);
+     glDeleteShader(vertex_shader);
+@@ -596,17 +631,9 @@ static struct ShaderProgram* gfx_opengl_create_and_load_new_shader(uint64_t shad
+             char name[32];
+             sprintf(name, "aTexCoord%d", i);
+             prg->attrib_locations[cnt] = glGetAttribLocation(shader_program, name);
+-            prg->attrib_sizes[cnt] = 2;
++            int num_clamps = (cc_features.clamp[i][0] ? 1 : 0) + (cc_features.clamp[i][1] ? 1 : 0);
++            prg->attrib_sizes[cnt] = 2 + num_clamps;
+             ++cnt;
+-
+-            for (int j = 0; j < 2; j++) {
+-                if (cc_features.clamp[i][j]) {
+-                    sprintf(name, "aTexClamp%s%d", j == 0 ? "S" : "T", i);
+-                    prg->attrib_locations[cnt] = glGetAttribLocation(shader_program, name);
+-                    prg->attrib_sizes[cnt] = 1;
+-                    ++cnt;
+-                }
+-            }
+         }
+     }
+ 
+@@ -695,8 +722,9 @@ static void gfx_opengl_select_texture(int tile, GLuint texture_id, bool linear_f
+ }
+ 
+ static void gfx_opengl_upload_texture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height, bool gen_mipmaps) {
+-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
+-	if (gen_mipmaps || current_filter_mode == FILTER_THREE_POINT) {
++    const GLint internalFormat = gl_es ? GL_RGBA : GL_RGBA8;
++    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
++	if (!gl_es && (gen_mipmaps || current_filter_mode == FILTER_THREE_POINT) && glGenerateMipmap) {
+ 		glGenerateMipmap(GL_TEXTURE_2D);
+ 	}
+ }
+@@ -723,7 +751,7 @@ static void gfx_opengl_set_sampler_parameters(int tile, bool linear_filter, uint
+         {  GL_NEAREST,       GL_NEAREST,                  GL_NEAREST                }, // FILTER_THREE_POINT
+     };
+ 
+-    mipmaps = mipmaps && (current_mipmap_filter_mode != MIPMAP_DISABLED);
++    mipmaps = mipmaps && (current_mipmap_filter_mode != MIPMAP_DISABLED) && !gl_es;
+     const int mip_idx = mipmaps ? current_mipmap_filter_mode : 0;
+     const GLint min_filter = linear_filter ? min_filters[current_filter_mode][mip_idx] : GL_NEAREST;
+     const GLint max_filter = linear_filter && (current_filter_mode == FILTER_LINEAR) ? GL_LINEAR : GL_NEAREST;
+@@ -784,7 +812,7 @@ static void gfx_opengl_set_depth_mode(bool depth_test, bool depth_update, bool d
+ static void gfx_opengl_set_depth_range(float znear, float zfar) {
+     if (glDepthRangef) {
+         glDepthRangef(znear, zfar);
+-    } else {
++    } else if (glDepthRange) {
+         glDepthRange(znear, zfar);
+     }
+ }
+@@ -811,7 +839,39 @@ static void gfx_opengl_set_use_alpha(bool use_alpha, bool modulate) {
+ }
+ 
+ static void gfx_opengl_draw_triangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
+-    // printf("flushing %d tris\n", buf_vbo_num_tris);
++    if (buf_vbo_num_tris == 0 || !current_shader_program) {
++        return;
++    }
++
++    if (gl_es && GLVersion.major < 3) {
++        glBindBuffer(GL_ARRAY_BUFFER, 0);
++
++        size_t num_floats = current_shader_program->num_floats;
++        size_t pos = 0;
++        for (int i = 0; i < current_shader_program->num_attribs; i++) {
++            if (current_shader_program->attrib_locations[i] >= 0) {
++                glEnableVertexAttribArray(current_shader_program->attrib_locations[i]);
++                glVertexAttribPointer(current_shader_program->attrib_locations[i],
++                                      current_shader_program->attrib_sizes[i],
++                                      GL_FLOAT, GL_FALSE,
++                                      num_floats * sizeof(float),
++                                      (const void*)(buf_vbo + pos));
++            }
++            pos += current_shader_program->attrib_sizes[i];
++        }
++
++        glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
++
++        for (int i = 0; i < current_shader_program->num_attribs; i++) {
++            if (current_shader_program->attrib_locations[i] >= 0) {
++                glDisableVertexAttribArray(current_shader_program->attrib_locations[i]);
++            }
++        }
++
++        return;
++    }
++
++    glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
+     glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
+     glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
+ }
+@@ -847,6 +907,9 @@ static void gfx_opengl_enable_debug(void) {
+ }
+ 
+ static bool gfx_opengl_supports_framebuffers(void) {
++    if (gl_es) {
++        return false;
++    }
+     if (GLVersion.major > 2) {
+         // GL3.0+ supports everything we need, but we'll still check it for sanity
+         return (glad_glFramebufferRenderbuffer && glad_glBlitFramebuffer && glad_glRenderbufferStorageMultisample);
+@@ -864,6 +927,10 @@ static bool gfx_opengl_supports_framebuffers(void) {
+ }
+ 
+ static bool gfx_opengl_supports_shaders(void) {
++    if (gl_es) {
++        return true;
++    }
++
+     if (GLVersion.major > 2) {
+         // should support GLSL130+
+         return true;
+@@ -915,7 +982,9 @@ static void *gl_load_proc(const char *name) {
+         }
+     }
+ 
+-    sysLogPrintf(LOG_ERROR, "GL: could not find function: %s", name);
++    if (sysArgCheck("--debug-gl")) {
++        sysLogPrintf(LOG_WARNING, "GL: could not find function: %s", name);
++    }
+ 
+     return NULL;
+ }
+@@ -954,16 +1023,23 @@ static void gfx_opengl_init_extensions(void) {
+ }
+ 
+ static void gfx_opengl_init(void) {
+-    if (!gladLoadGLLoader(gl_load_proc) || glGetString == NULL || glEnable == NULL) {
+-        sysFatalError("Could not load OpenGL.\nReported SDL error: %s", SDL_GetError());
+-    }
+-
+     // check if we're using ES or core, which have more limited feature sets
+     int val = 0;
+     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &val);
+     gl_core_profile = (val == SDL_GL_CONTEXT_PROFILE_CORE);
+     gl_es = (val == SDL_GL_CONTEXT_PROFILE_ES);
+ 
++    int loaded = 0;
++    if (gl_es) {
++        loaded = gladLoadGLES2Loader(gl_load_proc);
++    } else {
++        loaded = gladLoadGLLoader(gl_load_proc);
++    }
++
++    if (!loaded || glGetString == NULL || glEnable == NULL) {
++        sysFatalError("Could not load OpenGL.\nReported SDL error: %s", SDL_GetError());
++    }
++
+     gfx_opengl_init_extensions();
+ 
+     if (sysArgCheck("--debug-gl")) {
+@@ -972,7 +1048,13 @@ static void gfx_opengl_init(void) {
+         gfx_opengl_log_info();
+     }
+ 
+-    if (GLVersion.major < 2 || (GLVersion.major == 2 && GLVersion.minor < 1)) {
++    if (gl_es) {
++        if (GLVersion.major < 2) {
++            const char *ver = (const char *)glGetString(GL_VERSION);
++            sysFatalError("Could not load OpenGL ES 2.0.\nReported version: %d.%d (%s)",
++                GLVersion.major, GLVersion.minor, ver ? ver : "unknown");
++        }
++    } else if (GLVersion.major < 2 || (GLVersion.major == 2 && GLVersion.minor < 1)) {
+         const char *ver = (const char *)glGetString(GL_VERSION);
+         sysFatalError("Could not load OpenGL 2.1.\nReported version: %d.%d (%s)",
+             GLVersion.major, GLVersion.minor, ver ? ver : "unknown");
+@@ -997,9 +1079,13 @@ static void gfx_opengl_init(void) {
+ 
+     // determine GLSL version
+     if (gl_es) {
+-        // ES has its own numbering scheme, but it should support 300 even on 3.1 and 3.2
+-        gl_glsl_version = 300;
+-        snprintf(gl_glsl_version_str, sizeof(gl_glsl_version_str), "%d es", gl_glsl_version);
++        if (GLVersion.major < 3) {
++            gl_glsl_version = 100;
++            snprintf(gl_glsl_version_str, sizeof(gl_glsl_version_str), "%d", gl_glsl_version);
++        } else {
++            gl_glsl_version = 300;
++            snprintf(gl_glsl_version_str, sizeof(gl_glsl_version_str), "%d es", gl_glsl_version);
++        }
+     } else if (!gl_core_profile) {
+         // in compat profile we can just request the lowest possible
+         gl_glsl_version = 130;
+@@ -1017,15 +1103,24 @@ static void gfx_opengl_init(void) {
+     }
+     sysLogPrintf(LOG_NOTE, "GL: using GLSL version %s", gl_glsl_version_str);
+ 
++    if (!glDepthRangef) {
++        glDepthRangef = (PFNGLDEPTHRANGEFPROC)gl_load_proc("glDepthRangef");
++    }
++    if (!glGenerateMipmap) {
++        glGenerateMipmap = (PFNGLGENERATEMIPMAPPROC)gl_load_proc("glGenerateMipmap");
++    }
++
+     glGenBuffers(1, &opengl_vbo);
+     glBindBuffer(GL_ARRAY_BUFFER, opengl_vbo);
+ 
+-    if (gl_core_profile || gl_es) {
++    if (gl_core_profile || (gl_es && GLVersion.major >= 3)) {
+         // warn user that funny things can happen
+         sysLogPrintf(LOG_WARNING, "GL: using core profile or ES, watch out for errors");
+         // core/es will explode if we don't use a VAO for our VBO
+-        glGenVertexArrays(1, &opengl_vao);
+-        glBindVertexArray(opengl_vao);
++        if (glGenVertexArrays && glBindVertexArray) {
++            glGenVertexArrays(1, &opengl_vao);
++            glBindVertexArray(opengl_vao);
++        }
+     }
+ 
+     if (GLAD_GL_ARB_depth_clamp) {
+diff --git a/port/fast3d/gfx_pc.cpp b/port/fast3d/gfx_pc.cpp
+index e0f66734d..3b6d9a444 100644
+--- a/port/fast3d/gfx_pc.cpp
++++ b/port/fast3d/gfx_pc.cpp
+@@ -1562,7 +1562,7 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bo
+                             const float distance_frac = std::max(0.f, std::min(w / 1024.f, 1.f));
+                             tmp.r = tmp.g = tmp.b = tmp.a = (0.7f + distance_frac * 0.3f) * 255.f;
+                         } else {
+-                            tmp.r = tmp.g = tmp.b = tmp.a = 255;
++                            tmp.r = tmp.g = tmp.b = tmp.a = 0;
+                         }
+                         color = &tmp;
+                         break;
+diff --git a/port/fast3d/gfx_pc.h b/port/fast3d/gfx_pc.h
+index 0ca55152f..370383d89 100644
+--- a/port/fast3d/gfx_pc.h
++++ b/port/fast3d/gfx_pc.h
+@@ -26,7 +26,14 @@ struct TextureCacheKey {
+     uint8_t fmt, siz;
+     uint8_t palette_index;
+ 
+-    bool operator==(const TextureCacheKey&) const noexcept = default;
++    bool operator==(const TextureCacheKey& o) const noexcept {
++        return texture_addr == o.texture_addr &&
++               palette_addrs[0] == o.palette_addrs[0] &&
++               palette_addrs[1] == o.palette_addrs[1] &&
++               fmt == o.fmt &&
++               siz == o.siz &&
++               palette_index == o.palette_index;
++    }
+ 
+     struct Hasher {
+         size_t operator()(const TextureCacheKey& key) const noexcept {
+diff --git a/port/fast3d/gfx_sdl2.cpp b/port/fast3d/gfx_sdl2.cpp
+index f967cb8c8..3f1daed48 100644
+--- a/port/fast3d/gfx_sdl2.cpp
++++ b/port/fast3d/gfx_sdl2.cpp
+@@ -147,10 +147,14 @@ static void gfx_sdl_init(const struct GfxWindowInitSettings *set) {
+     // if that doesn't work, try 3.2 core in case we're on mac, 2.1 compat as a last resort
+     static u32 glver[][3] = {
+         { 0, 0, 0                                    }, // for command line override
++#if defined(__arm__) || defined(__aarch64__)
++        { 2, 0, SDL_GL_CONTEXT_PROFILE_ES            }, // es2: Raspberry Pi / VideoCore IV
++#endif
+         { 3, 0, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY }, // 3.0: default, has all the features required
+         { 4, 1, SDL_GL_CONTEXT_PROFILE_CORE          }, // 4.1core: macs only have core profile and this is the latest
+         { 3, 2, SDL_GL_CONTEXT_PROFILE_CORE          }, // 3.2core: older macs will only have this at best
+         { 3, 0, SDL_GL_CONTEXT_PROFILE_ES            }, // es3: don't really support ES properly, but we can try
++        { 2, 0, SDL_GL_CONTEXT_PROFILE_ES            }, // es2: Raspberry Pi / VideoCore IV
+         { 2, 1, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY }, // 2.1: absolute last resort, will still require GLSL130 as an extension
+     };
+ 
+diff --git a/port/src/input.c b/port/src/input.c
+index 0adad35c2..9f507076c 100644
+--- a/port/src/input.c
++++ b/port/src/input.c
+@@ -12,6 +12,18 @@
+ #include "system.h"
+ #include "fs.h"
+ 
++#if !SDL_VERSION_ATLEAST(2, 0, 12)
++typedef int SDL_GameControllerType;
++#define SDL_CONTROLLER_TYPE_UNKNOWN 0
++#define SDL_CONTROLLER_TYPE_VIRTUAL 0
++#define SDL_GameControllerGetType(x) 0
++#define SDL_GameControllerSetPlayerIndex(x, y) ((void)0)
++#endif
++#ifndef SDL_HINT_JOYSTICK_RAWINPUT
++#define SDL_HINT_JOYSTICK_RAWINPUT "SDL_JOYSTICK_RAWINPUT"
++#endif
++
++
+ #if !SDL_VERSION_ATLEAST(2, 0, 14)
+ // this was added in 2.0.14
+ #define SDL_CONTROLLER_TYPE_VIRTUAL SDL_CONTROLLER_TYPE_UNKNOWN
+diff --git a/port/src/optionsmenu.c b/port/src/optionsmenu.c
+index 6ab58c265..36d4be752 100644
+--- a/port/src/optionsmenu.c
++++ b/port/src/optionsmenu.c
+@@ -134,6 +134,9 @@ static MenuItemHandlerResult menuhandlerMouseLockMode(s32 operation, struct menu
+ 		data->dropdown.value = ARRAYCOUNT(opts);
+ 		break;
+ 	case MENUOP_GETOPTIONTEXT:
++		if (data->dropdown.value >= ARRAYCOUNT(opts)) {
++			data->dropdown.value = 0;
++		}
+ 		return (intptr_t)opts[data->dropdown.value];
+ 	case MENUOP_SET:
+ 		inputSetMouseLockMode(data->checkbox.value);
+@@ -711,6 +714,9 @@ static MenuItemHandlerResult menuhandlerFullScreenMode(s32 operation, struct men
+ 		data->dropdown.value = ARRAYCOUNT(opts);
+ 		break;
+ 	case MENUOP_GETOPTIONTEXT:
++		if (data->dropdown.value >= ARRAYCOUNT(opts)) {
++			data->dropdown.value = 0;
++		}
+ 		return (intptr_t)opts[data->dropdown.value];
+ 	case MENUOP_SET:
+ 		videoSetFullscreenMode(data->dropdown.value);
+@@ -751,9 +757,13 @@ static MenuItemHandlerResult menuhandlerVsync(s32 operation, struct menuitem *it
+ 		data->dropdown.value = numOpts;
+ 		break;
+ 	case MENUOP_GETOPTIONTEXT:
++		if ((s32)data->dropdown.value < 0) {
++			data->dropdown.value = 0;
++		}
+ 		if (data->dropdown.value < ARRAYCOUNT(constOpts))
+ 			return (intptr_t)constOpts[data->dropdown.value];
+ 		vblanks = (s32)data->dropdown.value - 1;
++		if (vblanks < 0) vblanks = 1;
+ 		snprintf(dynOpt, sizeof(dynOpt), "On (%d frames)", vblanks);
+ 		return (intptr_t)dynOpt;
+ 	case MENUOP_SET:
+@@ -840,8 +850,8 @@ static MenuItemHandlerResult menuhandlerResolution(s32 operation, struct menuite
+ 		data->dropdown.value = videoGetNumDisplayModes();
+ 		break;
+ 	case MENUOP_GETOPTIONTEXT:
+-		videoGetDisplayMode(&mode, data->dropdown.value);
+-		if (mode.width == 0 && mode.height == 0) {
++		memset(&mode, 0, sizeof(mode));
++		if (!videoGetDisplayMode(&mode, data->dropdown.value) || (mode.width == 0 && mode.height == 0)) {
+ 			return (intptr_t)rescustom;
+ 		} else {
+ 			snprintf(resstring, sizeof(resstring), "%dx%d", mode.width, mode.height);
+@@ -870,6 +880,9 @@ static MenuItemHandlerResult menuhandlerTexFilter(s32 operation, struct menuitem
+ 		data->dropdown.value = ARRAYCOUNT(opts);
+ 		break;
+ 	case MENUOP_GETOPTIONTEXT:
++		if (data->dropdown.value >= ARRAYCOUNT(opts)) {
++			data->dropdown.value = 0;
++		}
+ 		return (intptr_t)opts[data->dropdown.value];
+ 	case MENUOP_SET:
+ 		videoSetTextureFilter(data->dropdown.value);
+@@ -911,6 +924,8 @@ static MenuItemHandlerResult menuhandlerTexFilter2D(s32 operation, struct menuit
+ static MenuItemHandlerResult menuhandlerAnisotropicFiltering(s32 operation, struct menuitem *item, union handlerdata *data)
+ {
+ 	switch (operation) {
++	case MENUOP_CHECKDISABLED:
++		return (videoGetMaxAnisotropyLevel() <= 1);
+ 	case MENUOP_GETSLIDER:
+ 		data->slider.value = videoGetAnisotropicFilter();
+ 		break;
+@@ -973,6 +988,9 @@ static MenuItemHandlerResult menuhandlerCenterHUD(s32 operation, struct menuitem
+ 		data->dropdown.value = ARRAYCOUNT(opts);
+ 		break;
+ 	case MENUOP_GETOPTIONTEXT:
++		if (data->dropdown.value >= ARRAYCOUNT(opts)) {
++			data->dropdown.value = 0;
++		}
+ 		return (intptr_t)opts[data->dropdown.value];
+ 	case MENUOP_SET:
+ 		g_HudCenter = data->checkbox.value;
+@@ -2029,7 +2047,11 @@ void updateMaxAnisotropyLevel()
+ 		const char *text = menuResolveParam2Text(item);
+ 		
+ 		if (text && strstr(text, "Anisotropic Filtering") != NULL) {
+-			item->param3 = videoGetMaxAnisotropyLevel();
++			const u32 maxAniso = videoGetMaxAnisotropyLevel();
++			item->param3 = maxAniso > 0 ? maxAniso : 1;
++			if (maxAniso <= 1) {
++				item->flags |= MENUITEMFLAG_ALWAYSDISABLED;
++			}
+ 			break;
+ 		}
+ 	}
+diff --git a/port/src/system.c b/port/src/system.c
+index 0f0cdc218..7dacda742 100644
+--- a/port/src/system.c
++++ b/port/src/system.c
+@@ -42,7 +42,7 @@ __attribute__((dllexport)) u32 AmdPowerXpressRequestHighPerformance = 1;
+ #define DO_YIELD() _mm_pause()
+ #elif defined(PLATFORM_ARM) && (defined(PLATFORM_64BIT) || PLATFORM_ARM == 7 || PLATFORM_ARM == 8)
+ // same as YieldProcessor() on ARM Windows
+-#define DO_YIELD() __asm__ volatile("dmb ishst\n\tyield":::"memory")
++#define DO_YIELD() do { } while (0)
+ #else
+ // fuck it
+ #define DO_YIELD() do { } while (0)
+diff --git a/port/src/video.c b/port/src/video.c
+index 8bc3e9143..cdfbb1536 100644
+--- a/port/src/video.c
++++ b/port/src/video.c
+@@ -13,11 +13,16 @@
+ #include "../fast3d/gfx_sdl.h"
+ #include "../fast3d/gfx_opengl.h"
+ 
+-#ifdef PLATFORM_NSWITCH
++#if defined(PLATFORM_NSWITCH)
+ #define DEFAULT_VID_WIDTH 1280
+ #define DEFAULT_VID_HEIGHT 720
+ #define DEFAULT_VID_FULLSCREEN true
+ #define DEFAULT_VID_FULLSCREEN_EXCLUSIVE true
++#elif defined(__arm__) || defined(__aarch64__)
++#define DEFAULT_VID_WIDTH 320
++#define DEFAULT_VID_HEIGHT 240
++#define DEFAULT_VID_FULLSCREEN true
++#define DEFAULT_VID_FULLSCREEN_EXCLUSIVE true
+ #else
+ #define DEFAULT_VID_WIDTH 640
+ #define DEFAULT_VID_HEIGHT 480
+diff --git a/src/game/bondmove.c b/src/game/bondmove.c
+index 414e3cc1d..078b091a1 100644
+--- a/src/game/bondmove.c
++++ b/src/game/bondmove.c
+@@ -1251,7 +1251,11 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
+ 					invbuttons = L_TRIG | R_TRIG;
+ 				} else {
+ 					shootbuttons = Z_TRIG;
++#ifndef PLATFORM_N64
++					aimbuttons = R_TRIG;
++#else
+ 					aimbuttons = L_TRIG | R_TRIG;
++#endif
+ 					invbuttons = A_BUTTON;
+ 				}
+ 
+@@ -1577,7 +1581,7 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
+ 					}
+ 
+ #ifndef PLATFORM_N64
+-					if (controlmode == CONTROLMODE_PC && allowc1buttons) {
++					if (allowc1buttons) {
+ 						// handle L button : alt switching
+ 						for (i = 0; i < numsamples; i++) {
+ 							bgunProcessInputAltButton(&movedata, contpad1, i);
+@@ -1590,6 +1594,7 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
+ 							}
+ 						}
+ 
++						if (controlmode == CONTROLMODE_PC) {
+ 						// Handle radial menu (D-Down)
+ 						for (i = 0; i < numsamples; i++) {
+ 							if (joyGetButtonsOnSample(i, contpad1, c1allowedbuttons & BUTTON_RADIAL)) {
+@@ -1661,6 +1666,7 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
+ 						while (g_Vars.currentplayer->crouchpos > oldcrouchpos && !bwalkCanUncrouch()) {
+ 							g_Vars.currentplayer->crouchpos--;
+ 						}
++						}
+ 					}
+ #endif
+ 
+@@ -1845,7 +1851,7 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
+ 	s32 usereloads = (controlmode != CONTROLMODE_PC);
+ #ifndef PLATFORM_N64
+ 	usereloads = usereloads || PLAYER_EXTCFG().usereloads;
+-	if (controlmode == CONTROLMODE_PC && movedata.alt1tapcount) {
++	if (movedata.alt1tapcount) {
+ 		g_Vars.currentplayer->bondactivateorreload = g_Vars.currentplayer->bondactivateorreload | JO_ACTION_RELOAD;
+ 	}
+ #endif
+diff --git a/src/game/game_1531a0.c b/src/game/game_1531a0.c
+index 649888117..8c1df4b43 100644
+--- a/src/game/game_1531a0.c
++++ b/src/game/game_1531a0.c
+@@ -2541,6 +2541,12 @@ glabel textMeasure
+ // Mismatch: Regalloc
+ void textMeasure(s32 *textheight, s32 *textwidth, char *text, struct fontchar *font1, struct font *font2, s32 lineheight)
+ {
++	if (!text || !font1) {
++		if (textheight) *textheight = 0;
++		if (textwidth) *textwidth = 0;
++		return;
++	}
++
+ 	char prevchar;
+ 	char thischar;
+ 	s32 longest;
+diff --git a/src/game/menu.c b/src/game/menu.c
+index 256085a14..0844e0c38 100644
+--- a/src/game/menu.c
++++ b/src/game/menu.c
+@@ -267,9 +267,9 @@ bool menuIsSoloMissionOrMp(void)
+ 
+ bool currentPlayerIsMenuOpenInSoloOrMp(void)
+ {
+-	s32 mpindex = g_Vars.currentplayerstats->mpindex;
++	if (g_Vars.currentplayerstats && menuIsSoloMissionOrMp()) {
++		s32 mpindex = g_Vars.currentplayerstats->mpindex;
+ 
+-	if (menuIsSoloMissionOrMp()) {
+ 		if (mpindex >= 4) {
+ 			mpindex -= 4;
+ 		}
+@@ -684,7 +684,12 @@ void menuCalculateItemSize(struct menuitem *item, s16 *width, s16 *height, struc
+ 				item->handler(MENUOP_GETSELECTEDINDEX, item, &handlerdata2);
+ 				handlerdata2.dropdown.unk04 = 0;
+ 				text2 = (char *)item->handler(MENUOP_GETOPTIONTEXT, item, &handlerdata2);
+-				textMeasure(&textheight, &textwidth, text2, g_CharsHandelGothicSm, g_FontHandelGothicSm, 0);
++				if (text2) {
++					textMeasure(&textheight, &textwidth, text2, g_CharsHandelGothicSm, g_FontHandelGothicSm, 0);
++				} else {
++					textwidth = 0;
++					textheight = 0;
++				}
+ 
+ #if VERSION >= VERSION_PAL_FINAL
+ 				if ((item->flags & MENUITEMFLAG_ADJUSTWIDTH) == 0) {
+@@ -5191,12 +5196,12 @@ void menuProcessInput(void)
+ 		inputs.start = starttap ? true : false;
+ 
+ #ifndef PLATFORM_N64
+-		// if we haven't been using the mouse but we have been keyboard scrolling disable the mouse
+-		if (!inputs.mousemoved && (inputs.leftright || inputs.updown || inputs.leftrightheld || inputs.updownheld)) {
++		// if we haven't been using the mouse but we have been keyboard/gamepad scrolling or pressing pad buttons, disable the mouse
++		if (!inputs.mousemoved && (inputs.leftright || inputs.updown || inputs.leftrightheld || inputs.updownheld || stickx || sticky || (inputs.select && !inputs.mouseheld) || inputs.back || inputs.start)) {
+ 			g_MenuUsingMouse = false;
+ 		}
+-		// otherwise rotate left/right by clicking on the side of the menu
+-		if (g_MenuUsingMouse && inputs.select && !inputs.leftright && !inputs.leftrightheld) {
++		// otherwise rotate left/right by clicking on the side of the menu with the mouse
++		if (g_MenuUsingMouse && inputs.mouseheld && inputs.select && !inputs.leftright && !inputs.leftrightheld) {
+ 			if (inputs.mousey > dialog->y && inputs.mousey < dialog->y + dialog->height) {
+ 				if (inputs.mousex < dialog->x) {
+ 					inputs.leftright = -1;
+diff --git a/src/game/menuitem.c b/src/game/menuitem.c
+index be3f6275c..93924dc89 100644
+--- a/src/game/menuitem.c
++++ b/src/game/menuitem.c
+@@ -2475,8 +2475,9 @@ Gfx *menuitemSliderRender(Gfx *gdl, struct menurendercontext *context)
+ 		x -= 6;
+ 	}
+ 
++	const s32 slidermax = context->item->param3 > 0 ? context->item->param3 : 1;
+ 	label = menuResolveParam2Text(context->item);
+-	markerx = context->x + context->width + slidervalue * 75 / context->item->param3 - 82;
++	markerx = context->x + context->width + slidervalue * 75 / slidermax - 82;
+ 
+ 	colour = MIXCOLOUR(context->dialog, item_unfocused);
+ 
+@@ -2640,12 +2641,13 @@ bool menuitemSliderTick(struct menuitem *item, struct menudialog *dialog, struct
+ 			}
+ #endif
+ 
++			const s32 slidermax = item->param3 > 0 ? item->param3 : 1;
+ 			if ((item->flags & MENUITEMFLAG_SLIDER_FAST) == 0
+ 					&& g_Menus[g_MpPlayerNum].xrepeatmode == MENUREPEATMODE_SLOW) {
+ 				index = index + inputs->leftright;
+ 			} else {
+ 				f0 = data->slider.multiplier / 1000.0f;
+-				f0 = f0 * 100.0f / item->param3;
++				f0 = f0 * 100.0f / slidermax;
+ #if VERSION >= VERSION_PAL_BETA
+ 				f0 = f0 + inputs->leftrightheld * g_Vars.diffframe60freal;
+ #else
+@@ -2674,7 +2676,7 @@ bool menuitemSliderTick(struct menuitem *item, struct menudialog *dialog, struct
+ 				}
+ 			} else {
+ 				f0 = data->slider.multiplier / 1000.0f;
+-				f0 = f0 * 100.0f / item->param3;
++				f0 = f0 * 100.0f / slidermax;
+ 
+ 				if (inputs->xaxis < 0) {
+ 					f2 = -f14;
+diff --git a/src/game/propobj.c b/src/game/propobj.c
+index 0d1b3f253..255ecddfa 100644
+--- a/src/game/propobj.c
++++ b/src/game/propobj.c
+@@ -4817,6 +4817,10 @@ s32 glassCalculateOpacity(struct coord *pos, f32 xludist, f32 opadist, f32 arg3)
+ 
+ 	f32 distance = sqrtf(xdiff * xdiff + ydiff * ydiff + zdiff * zdiff);
+ 
++	if (arg3 < 0.25f) {
++		arg3 = 0.25f;
++	}
++
+ 	if (distance > opadist) {
+ 		opacity = 255;
+ 	} else if (distance < xludist) {
+@@ -13465,7 +13469,11 @@ void objRenderProp(struct prop *prop, struct modelrenderdata *renderdata, bool x
+ 				renderdata->envcolour &= 0xffffff00;
+ 			}
+ 		} else if ((obj->hidden2 & OBJH2FLAG_80) == 0) {
+-			renderdata->cullmode = CULLMODE_BACK;
++			if (obj->type == OBJTYPE_GLASS || obj->type == OBJTYPE_TINTEDGLASS) {
++				renderdata->cullmode = CULLMODE_NONE;
++			} else {
++				renderdata->cullmode = CULLMODE_BACK;
++			}
+ 
+ 			if (renderdata->unk30 == 9) {
+ 				renderdata->envcolour &= 0xffffff00;
+@@ -13771,6 +13779,8 @@ Gfx *objRender(struct prop *prop, Gfx *gdl, bool xlupass)
+ 		} else {
+ 			if (obj->type == OBJTYPE_DOOR && ((struct doorobj *)obj)->doorflags & DOORFLAG_WINDOWED) {
+ 				renderdata.envcolour = ((struct doorobj *)obj)->fadealpha << 8;
++			} else if (obj->type == OBJTYPE_GLASS) {
++				renderdata.envcolour = 0x5000;
+ 			} else {
+ 				renderdata.envcolour = 0;
+ 			}
+diff --git a/src/game/setuppads.c b/src/game/setuppads.c
+index 52a7cba11..60e4627a9 100644
+--- a/src/game/setuppads.c
++++ b/src/game/setuppads.c
+@@ -12,6 +12,8 @@
+ #include "data.h"
+ #include "types.h"
+ #include "platform.h"
++#include "lib/memp.h"
++#include <string.h>
+ 
+ /**
+  * The function assumes that a pad file's data has been loaded from the ROM
+@@ -97,6 +99,13 @@ void setupPreparePads(void)
+ 	g_StageSetup.cover = (void *) ((intptr_t)g_StageSetup.padfiledata + g_PadsFile->coversoffset);
+ 
+ 	if (g_StageSetup.cover != NULL) {
++		if ((uintptr_t)g_StageSetup.cover & 3) {
++			void *aligned_cover = mempAlloc(ALIGN16(g_PadsFile->numcovers * sizeof(struct coverdefinition)), MEMPOOL_STAGE);
++			if (aligned_cover) {
++				memcpy(aligned_cover, g_StageSetup.cover, g_PadsFile->numcovers * sizeof(struct coverdefinition));
++				g_StageSetup.cover = aligned_cover;
++			}
++		}
+ 		setupPrepareCover();
+ 	}
+ 
+diff --git a/src/lib/model.c b/src/lib/model.c
+index 7ad23e2b1..7ab9a5b85 100644
+--- a/src/lib/model.c
++++ b/src/lib/model.c
+@@ -2849,14 +2849,14 @@ void modelApplyRenderModeType3(struct modelrenderdata *renderdata, bool arg1)
+ 		}
+ 	} else if (renderdata->unk30 == 9) {
+ 		if ((renderdata->envcolour & 0xff) == 0) {
+-			if (arg1) {
+-				gDPPipeSync(renderdata->gdl++);
+-				gDPSetCycleType(renderdata->gdl++, G_CYC_2CYCLE);
+-				gDPSetFogColorViaWord(renderdata->gdl++, renderdata->fogcolour);
+-				gDPSetEnvColorViaWord(renderdata->gdl++, 0xffffffff);
+-				gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
+-				gDPSetCombineMode(renderdata->gdl++, G_CC_TRILERP, G_CC_CUSTOM_20);
++			gDPPipeSync(renderdata->gdl++);
++			gDPSetCycleType(renderdata->gdl++, G_CYC_2CYCLE);
++			gDPSetFogColorViaWord(renderdata->gdl++, renderdata->fogcolour);
++			gDPSetEnvColorViaWord(renderdata->gdl++, 0xffffffff);
++			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
++			gDPSetCombineMode(renderdata->gdl++, G_CC_CUSTOM_00, G_CC_CUSTOM_20);
+ 
++			if (arg1) {
+ 				if (renderdata->zbufferenabled) {
+ 					gDPSetRenderMode(renderdata->gdl++, G_RM_FOG_PRIM_A, G_RM_AA_ZB_OPA_SURF2);
+ 				} else {
+@@ -2870,11 +2870,12 @@ void modelApplyRenderModeType3(struct modelrenderdata *renderdata, bool arg1)
+ 				}
+ 			}
+ 		} else {
++			gDPPipeSync(renderdata->gdl++);
++			gDPSetCycleType(renderdata->gdl++, G_CYC_2CYCLE);
++			gDPSetFogColorViaWord(renderdata->gdl++, renderdata->fogcolour);
++			gDPSetEnvColorViaWord(renderdata->gdl++, renderdata->envcolour & 0xff);
++
+ 			if (arg1) {
+-				gDPPipeSync(renderdata->gdl++);
+-				gDPSetCycleType(renderdata->gdl++, G_CYC_2CYCLE);
+-				gDPSetFogColorViaWord(renderdata->gdl++, renderdata->fogcolour);
+-				gDPSetEnvColor(renderdata->gdl++, 0, 0, 0, renderdata->envcolour);
+ 				gDPSetCombineMode(renderdata->gdl++, G_CC_CUSTOM_21, G_CC_CUSTOM_18);
+ 
+ 				if (renderdata->zbufferenabled) {
+@@ -3012,7 +3013,7 @@ void modelApplyRenderModeType4(struct modelrenderdata *renderdata, bool arg1)
+ 			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
+ 
+ 			if (arg1) {
+-				gDPSetCombineMode(renderdata->gdl++, G_CC_TRILERP, G_CC_CUSTOM_20);
++				gDPSetCombineMode(renderdata->gdl++, G_CC_CUSTOM_00, G_CC_CUSTOM_20);
+ 
+ 				if (renderdata->zbufferenabled) {
+ 					gDPSetRenderMode(renderdata->gdl++, G_RM_FOG_PRIM_A, G_RM_AA_ZB_OPA_SURF2);
+@@ -3020,7 +3021,7 @@ void modelApplyRenderModeType4(struct modelrenderdata *renderdata, bool arg1)
+ 					gDPSetRenderMode(renderdata->gdl++, G_RM_FOG_PRIM_A, G_RM_AA_OPA_SURF2);
+ 				}
+ 			} else {
+-				gDPSetCombineMode(renderdata->gdl++, G_CC_TRILERP, G_CC_CUSTOM_20);
++				gDPSetCombineMode(renderdata->gdl++, G_CC_CUSTOM_00, G_CC_CUSTOM_20);
+ 
+ 				if (renderdata->zbufferenabled) {
+ 					gDPSetRenderMode(renderdata->gdl++, G_RM_FOG_PRIM_A, G_RM_AA_ZB_XLU_SURF2);
+@@ -3238,7 +3239,6 @@ void modelRenderNodeDl(struct modelrenderdata *renderdata, struct model *model,
+ 			gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL2, osVirtualToPhysical(rwdata->dl.colours));
+ 
+ 			gSPDisplayList(renderdata->gdl++, rwdata->dl.gdl);
+-
+ 			if (rodata->dl.mcount == 3 && rodata->dl.xlugdl) {
+ 				modelApplyRenderModeType3(renderdata, false);
+ 
