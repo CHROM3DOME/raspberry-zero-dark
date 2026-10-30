@@ -8,6 +8,18 @@ This release package provides **two configurations**:
 
 ---
 
+## Screenshots (320x240 Native Capture)
+
+| *dataDyne Central — Defection* Gameplay & Intact Glass | *dataDyne Central — Defection* Skyscraper Flyover Cutscene |
+| :---: | :---: |
+| ![Defection Rooftop Gameplay](screenshots/defection_rooftop_gameplay.png) | ![Defection Skyscraper Cutscene](screenshots/defection_skyscraper_cutscene.png) |
+| **Game Files ("Choose Your Reality") Menu** | **Holographic Agent Name Entry Menu** |
+| ![Choose Your Reality Menu](screenshots/menu_choose_your_reality.png) | ![Enter Agent Name Menu](screenshots/menu_enter_agent_name.png) |
+| **dataDyne 3D Metallic Shader Intro** | **Rareware 3D Emblem Intro** |
+| ![dataDyne 3D Logo](screenshots/intro_datadyne_logo.png) | ![Rareware 3D Logo](screenshots/intro_rareware_logo.png) |
+
+---
+
 ## Legal Notice & ROM Requirement
 
 - **No copyrighted material, ROM images (`.z64`), extracted assets, or precompiled binaries are included in this release.**
@@ -20,6 +32,13 @@ This release package provides **two configurations**:
 ```text
 raspberry-zero-dark/
 ├── README.md
+├── screenshots/
+│   ├── defection_rooftop_gameplay.png              # Rooftop gameplay & intact smoky glass railing
+│   ├── defection_skyscraper_cutscene.png           # Defection skyscraper flyover cutscene
+│   ├── menu_choose_your_reality.png                # Game Files ("Choose Your Reality") menu
+│   ├── menu_enter_agent_name.png                   # Holographic Agent Name entry menu
+│   ├── intro_datadyne_logo.png                     # dataDyne 3D metallic shader logo
+│   └── intro_rareware_logo.png                     # Rareware 3D emblem intro
 ├── patches/
 │   ├── 0001-perfect-dark-rpi-zero2w-generic.patch   # Variant 1: Generic RPi Zero 2W source patch
 │   └── 0001-perfect-dark-rpi-zero2w-pi-tin.patch    # Variant 2: Pi Tin handheld source patch
